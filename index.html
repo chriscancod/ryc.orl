@@ -530,5 +530,418 @@ function saveSettings(){
 
 renderStore();
 </script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
+import { getFirestore, collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBTVbOXFy0rgeMYMRKjLWG0zRLDp4_MKAU",
+  authDomain: "rys-orl.firebaseapp.com",
+  projectId: "rys-orl",
+  storageBucket: "rys-orl.firebasestorage.app",
+  messagingSenderId: "1089690032935",
+  appId: "1:1089690032935:web:4c3f017eebba309d796702"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// ── FIREBASE DATA LAYER ──
+// Override the DB object with Firestore
+window.FB_DB = db;
+window.FB = { collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, query, orderBy };
+
+// ── PRODUCTS ──
+async function fbGetProducts() {
+  const snap = await getDocs(collection(db, 'products'));
+  return snap.docs.map(d => ({id: d.id, ...d.data()}));
+}
+
+async function fbSaveProduct(product) {
+  const id = product.id ? String(product.id) : String(Date.now());
+  await setDoc(doc(db, 'products', id), {...product, id});
+  return id;
+}
+
+async function fbDeleteProduct(id) {
+  await deleteDoc(doc(db, 'products', String(id)));
+}
+
+// ── ORDERS ──
+async function fbGetOrders() {
+  const snap = await getDocs(collection(db, 'orders'));
+  return snap.docs.map(d => ({id: d.id, ...d.data()})).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
+}
+
+async function fbSaveOrder(order) {
+  await setDoc(doc(db, 'orders', order.id), {...order, timestamp: Date.now()});
+}
+
+async function fbDeleteOrder(id) {
+  await deleteDoc(doc(db, 'orders', String(id)));
+}
+
+// ── SETTINGS ──
+async function fbGetSettings() {
+  const snap = await getDocs(collection(db, 'settings'));
+  const defaults = {waNumber:'+14070000000', wsMin:50, adminPw:'admin15'};
+  if(snap.empty) return defaults;
+  return {...defaults, ...snap.docs[0].data()};
+}
+
+async function fbSaveSettings(s) {
+  await setDoc(doc(db, 'settings', 'main'), s);
+}
+
+// ── OVERRIDE STORE FUNCTIONS ──
+
+// Override renderStore to use Firebase
+window._originalRenderStore = window.renderStore;
+window.renderStore = async function() {
+  showLoading(true);
+  try {
+    window._cachedProducts = await fbGetProducts();
+    window._cachedSettings = await fbGetSettings();
+  } catch(e) { console.error(e); }
+  showLoading(false);
+  renderFilters();
+  renderProducts();
+  updateCartCount();
+};
+
+// Override renderProducts to use cached data
+window._originalRenderProducts = window.renderProducts;
+window.renderProducts = function() {
+  const grid = document.getElementById('productsGrid');
+  let prods = window._cachedProducts || [];
+  if(currentFilter !== 'all') prods = prods.filter(p => p.category === currentFilter);
+  if(!prods.length) {
+    grid.innerHTML = '<div class="empty-state"><p>No products yet</p><small>Add products from the admin panel · Añade productos desde el panel de admin</small></div>';
+    return;
+  }
+  grid.innerHTML = prods.map(p => `
+    <div class="product-card" onclick="openModal('${p.id}')">
+      ${p.image ? `<div class="product-img-wrap"><img src="${p.image}" alt="${escHtml(p.name)}" loading="lazy"></div>` : `<div class="product-img-ph"><svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg></div>`}
+      <div class="product-info">
+        <div class="product-cat">${escHtml(p.category||'')}</div>
+        <div class="product-name">${escHtml(p.name)}</div>
+        <div class="product-price">$${parseFloat(p.price).toFixed(2)}</div>
+        <div class="product-stock ${p.stock<=0?'p-stock-out':p.stock<=3?'p-stock-low':''}">${p.stock<=0?'Out of stock · Agotado':p.stock<=3?`Only ${p.stock} left`:'In stock · Disponible'}</div>
+        <button class="add-cart-btn" ${p.stock<=0?'disabled':''} onclick="event.stopPropagation();addToCart('${p.id}')">${p.stock<=0?'OUT OF STOCK':'ADD TO CART · AGREGAR'}</button>
+      </div>
+    </div>`).join('');
+};
+
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+
+window.renderFilters = function() {
+  const prods = window._cachedProducts || [];
+  const cats = ['all', ...new Set(prods.map(p=>p.category).filter(Boolean))];
+  document.getElementById('filtersBar').innerHTML = cats.map(c =>
+    `<button class="filter-btn ${c===currentFilter?'active':''}" onclick="filterProducts('${c.replace(/'/g,"\'")}',this)">${c==='all'?'All · Todo':c}</button>`
+  ).join('');
+};
+
+// Override openModal
+window._originalOpenModal = window.openModal;
+window.openModal = function(id) {
+  const prods = window._cachedProducts || [];
+  const p = prods.find(x => String(x.id) === String(id));
+  if(!p) return;
+  modalPid = id;
+  document.getElementById('modalCat').textContent = p.category||'';
+  document.getElementById('modalName').textContent = p.name;
+  document.getElementById('modalPrice').textContent = '$'+parseFloat(p.price).toFixed(2);
+  document.getElementById('modalDesc').textContent = p.description||'';
+  document.getElementById('modalStock').textContent = p.stock<=0?'Out of stock · Agotado':p.stock<=3?`Only ${p.stock} left`:`${p.stock} in stock`;
+  const btn = document.getElementById('modalAddBtn');
+  btn.disabled = p.stock<=0;
+  btn.textContent = p.stock<=0?'OUT OF STOCK':'ADD TO CART · AGREGAR AL CARRITO';
+  document.getElementById('modalImgWrap').innerHTML = p.image
+    ? `<img src="${p.image}" style="width:100%;max-height:300px;object-fit:cover;display:block">`
+    : `<div class="modal-img-ph"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#D4AF6A" stroke-width="1.2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg></div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+};
+
+// Override addToCart
+window._originalAddToCart = window.addToCart;
+window.addToCart = function(id) {
+  const prods = window._cachedProducts || [];
+  const p = prods.find(x => String(x.id) === String(id));
+  if(!p||p.stock<=0) return;
+  const item = cart.find(c => String(c.id) === String(id));
+  if(item) {
+    if(item.qty >= p.stock) { showToast('Max stock reached · Stock máximo alcanzado'); return; }
+    item.qty++;
+  } else { cart.push({id: String(id), qty:1}); }
+  updateCartCount();
+  showToast('Added to cart · Agregado al carrito ✦');
+};
+
+// Override cart drawer render
+window._originalRenderCartDrawer = window.renderCartDrawer;
+window.renderCartDrawer = function() {
+  const el = document.getElementById('cartItems'), footer = document.getElementById('cartFooter');
+  if(!cart.length) { el.innerHTML='<div class="cart-empty">Your cart is empty · Tu carrito está vacío</div>'; footer.style.display='none'; return; }
+  const prods = window._cachedProducts || [];
+  let sub = 0;
+  el.innerHTML = cart.map(c => {
+    const p = prods.find(x => String(x.id) === String(c.id)); if(!p) return '';
+    sub += p.price * c.qty;
+    return `<div class="cart-item">${p.image?`<img class="cart-item-img" src="${p.image}" alt="${escHtml(p.name)}">`:`<div class="cart-item-ph"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#D4AF6A" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg></div>`}
+      <div class="cart-item-info"><div class="cart-item-name">${escHtml(p.name)}</div><div class="cart-item-price">$${(p.price*c.qty).toFixed(2)}</div>
+      <div class="cart-item-qty"><button class="qty-btn" onclick="changeQty('${p.id}',-1)">−</button><span class="qty-num">${c.qty}</span><button class="qty-btn" onclick="changeQty('${p.id}',1)">+</button></div></div>
+      <button class="cart-remove" onclick="removeFromCart('${p.id}')">×</button></div>`;
+  }).join('');
+  const s = window._cachedSettings || {wsMin:50};
+  const wholesale = sub >= s.wsMin;
+  document.getElementById('cartSubtotal').textContent = '$'+sub.toFixed(2);
+  document.getElementById('cartTotal').textContent = '$'+sub.toFixed(2);
+  document.getElementById('wholesaleNote').style.display = wholesale?'block':'none';
+  footer.style.display = 'block';
+};
+
+window._originalChangeQty = window.changeQty;
+window.changeQty = function(id, d) {
+  const item = cart.find(c => String(c.id) === String(id)); if(!item) return;
+  item.qty += d;
+  if(item.qty <= 0) cart = cart.filter(c => String(c.id) !== String(id));
+  updateCartCount(); renderCartDrawer();
+};
+
+window._originalRemoveFromCart = window.removeFromCart;
+window.removeFromCart = function(id) {
+  cart = cart.filter(c => String(c.id) !== String(id));
+  updateCartCount(); renderCartDrawer();
+};
+
+// Override WhatsApp order
+window._originalOrderViaWhatsApp = window.orderViaWhatsApp;
+window.orderViaWhatsApp = async function() {
+  if(!cart.length) return;
+  const prods = window._cachedProducts || [];
+  const s = window._cachedSettings || {waNumber:'+14070000000', wsMin:50};
+  let msg = 'Hola! Me gustaría ordenar los siguientes productos de rys.Orl:\n\n';
+  let total = 0;
+  cart.forEach(c => {
+    const p = prods.find(x => String(x.id) === String(c.id)); if(!p) return;
+    const lt = p.price * c.qty; total += lt;
+    msg += `• ${p.name} x${c.qty} — $${lt.toFixed(2)}\n`;
+  });
+  msg += `\n*TOTAL: $${total.toFixed(2)}*`;
+  if(total >= s.wsMin) msg += '\n✦ Wholesale pricing applied';
+  const order = {
+    id: 'ORD-'+Date.now(),
+    date: new Date().toLocaleDateString(),
+    items: cart.map(c => { const p=prods.find(x=>String(x.id)===String(c.id)); return `${p?.name||'?'} x${c.qty}`; }),
+    total, status: 'pending'
+  };
+  await fbSaveOrder(order);
+  window.open(`https://wa.me/${s.waNumber.replace(/\D/g,'')}?text=${encodeURIComponent(msg)}`, '_blank');
+  cart = []; updateCartCount(); closeCart();
+  showToast('Order sent via WhatsApp! · ¡Pedido enviado!');
+};
+
+// ── ADMIN OVERRIDES ──
+
+window._originalGetS = window.getS;
+window.getS = function() {
+  return window._cachedSettings || {waNumber:'+14070000000', wsMin:50, adminPw:'admin15'};
+};
+
+window._originalRenderAdmin = window.renderAdmin;
+window.renderAdmin = async function() {
+  showLoading(true);
+  try {
+    window._cachedProducts = await fbGetProducts();
+    window._cachedOrders = await fbGetOrders();
+    window._cachedSettings = await fbGetSettings();
+  } catch(e) { console.error(e); }
+  showLoading(false);
+  renderStats();
+  renderAdminProducts();
+};
+
+window._originalRenderStats = window.renderStats;
+window.renderStats = function() {
+  const pr = window._cachedProducts||[], or = window._cachedOrders||[];
+  const rev = or.reduce((s,o)=>s+(o.total||0),0);
+  const low = pr.filter(p=>p.stock>0&&p.stock<=3).length;
+  const out = pr.filter(p=>p.stock<=0).length;
+  document.getElementById('statsRow').innerHTML = `
+    <div class="stat-card"><div class="stat-label">PRODUCTS</div><div class="stat-value">${pr.length}</div></div>
+    <div class="stat-card"><div class="stat-label">ORDERS</div><div class="stat-value">${or.length}</div></div>
+    <div class="stat-card"><div class="stat-label">REVENUE</div><div class="stat-value">$${rev.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-label">LOW STOCK</div><div class="stat-value" style="color:${low?'#E67E22':'inherit'}">${low}</div><div class="stat-sub">Out: ${out}</div></div>`;
+};
+
+window._originalRenderAdminProducts = window.renderAdminProducts;
+window.renderAdminProducts = function() {
+  const prods = window._cachedProducts || [];
+  const el = document.getElementById('adminProductList');
+  if(!prods.length) { el.innerHTML='<div style="text-align:center;padding:32px;color:var(--gray);font-size:13px;font-family:Cormorant Garamond,serif;font-style:italic">No products yet. Add your first product above.</div>'; return; }
+  el.innerHTML = prods.map(p=>`
+    <div class="ap-item">
+      ${p.image?`<img class="ap-thumb" src="${p.image}" alt="${escHtml(p.name)}">`:`<div class="ap-thumb-ph">IMG</div>`}
+      <div class="ap-details"><div class="ap-name">${escHtml(p.name)}</div>
+      <div class="ap-meta"><span>$${parseFloat(p.price).toFixed(2)}</span><span>${escHtml(p.category||'Uncategorized')}</span><span class="sp ${p.stock<=0?'sp-out':p.stock<=3?'sp-low':'sp-ok'}">${p.stock<=0?'OUT':p.stock<=3?'LOW':'OK'} · ${p.stock}</span></div></div>
+      <div class="ap-actions"><button class="btn-edit" onclick="editProduct('${p.id}')">EDIT</button><button class="btn-del" onclick="deleteProduct('${p.id}')">DELETE</button></div>
+    </div>`).join('');
+};
+
+window._originalSaveProduct = window.saveProduct;
+window.saveProduct = async function() {
+  const name = document.getElementById('pName').value.trim();
+  const price = parseFloat(document.getElementById('pPrice').value);
+  const stock = parseInt(document.getElementById('pStock').value);
+  const cat = document.getElementById('pCat').value.trim();
+  const desc = document.getElementById('pDesc').value.trim();
+  const imgEl = document.getElementById('imgPreview');
+  const image = imgEl.style.display!=='none' && imgEl.src ? imgEl.src : '';
+  if(!name||isNaN(price)||isNaN(stock)) { showToast('Please fill name, price & stock'); return; }
+  const id = editingId ? String(editingId) : String(Date.now());
+  const existing = editingId ? (window._cachedProducts||[]).find(p=>String(p.id)===String(editingId)) : null;
+  const product = {
+    id, name, price, stock, category: cat, description: desc,
+    image: image || (existing?.image || '')
+  };
+  showToast('Saving...');
+  await fbSaveProduct(product);
+  const was = !!editingId;
+  cancelEdit();
+  window._cachedProducts = await fbGetProducts();
+  renderAdmin();
+  renderFilters();
+  showToast(was?'Product updated · Actualizado':'Product added · Agregado');
+};
+
+window._originalEditProduct = window.editProduct;
+window.editProduct = function(id) {
+  const prods = window._cachedProducts || [];
+  const p = prods.find(x => String(x.id) === String(id)); if(!p) return;
+  editingId = id;
+  document.getElementById('pName').value = p.name;
+  document.getElementById('pPrice').value = p.price;
+  document.getElementById('pStock').value = p.stock;
+  document.getElementById('pCat').value = p.category||'';
+  document.getElementById('pDesc').value = p.description||'';
+  if(p.image) { const pr=document.getElementById('imgPreview'); pr.src=p.image; pr.style.display='block'; document.getElementById('uploadTxt').style.display='none'; }
+  document.getElementById('formTitle').textContent='EDIT PRODUCT · EDITAR PRODUCTO';
+  document.getElementById('cancelBtn').style.display='inline-block';
+  window.scrollTo({top:0,behavior:'smooth'});
+};
+
+window._originalDeleteProduct = window.deleteProduct;
+window.deleteProduct = async function(id) {
+  if(!confirm('Delete this product?\n¿Eliminar este producto?')) return;
+  await fbDeleteProduct(id);
+  window._cachedProducts = await fbGetProducts();
+  renderAdmin(); renderFilters();
+  showToast('Product deleted · Eliminado');
+};
+
+window._originalRenderOrders = window.renderOrders;
+window.renderOrders = async function() {
+  window._cachedOrders = await fbGetOrders();
+  const orders = window._cachedOrders;
+  const el = document.getElementById('ordersList');
+  if(!orders.length) { el.innerHTML='<div style="text-align:center;padding:48px;color:var(--gray);font-family:Cormorant Garamond,serif;font-style:italic;font-size:18px">No orders yet · Aún no hay pedidos</div>'; return; }
+  el.innerHTML = orders.map(o=>`
+    <div class="order-card">
+      <div class="order-hdr"><span class="order-id">${o.id}</span><span class="ob ob-${o.status}">${o.status.toUpperCase()}</span></div>
+      <div class="order-prods">${Array.isArray(o.items)?o.items.join(', '):o.items}</div>
+      <div class="order-foot"><span class="order-total">$${parseFloat(o.total).toFixed(2)}</span><span class="order-date">${o.date}</span></div>
+      <div class="order-actions"><button class="oab" onclick="setOrderStatus('${o.id}','confirmed')">✓ Confirm</button><button class="oab" onclick="setOrderStatus('${o.id}','shipped')">📦 Shipped</button><button class="oab danger" onclick="deleteOrder('${o.id}')">Delete</button></div>
+    </div>`).join('');
+};
+
+window._originalSetOrderStatus = window.setOrderStatus;
+window.setOrderStatus = async function(id, status) {
+  const orders = window._cachedOrders || [];
+  const o = orders.find(x=>x.id===id); if(!o) return;
+  o.status = status;
+  await fbSaveOrder(o);
+  renderOrders(); renderStats();
+  showToast('Order updated · Pedido actualizado');
+};
+
+window._originalDeleteOrder = window.deleteOrder;
+window.deleteOrder = async function(id) {
+  if(!confirm('Delete this order?')) return;
+  await fbDeleteOrder(id);
+  window._cachedOrders = (window._cachedOrders||[]).filter(o=>o.id!==id);
+  renderOrders(); renderStats();
+};
+
+window._originalRenderInventory = window.renderInventory;
+window.renderInventory = async function() {
+  window._cachedProducts = await fbGetProducts();
+  const prods = window._cachedProducts;
+  const el = document.getElementById('inventoryList');
+  if(!prods.length) { el.innerHTML='<div style="text-align:center;padding:40px;color:var(--gray)">No products yet</div>'; return; }
+  el.innerHTML = '<div style="margin-bottom:14px;font-family:Cinzel,serif;font-size:10px;letter-spacing:0.18em;color:var(--gray)">STOCK LEVELS · NIVELES DE INVENTARIO</div>'
+    + prods.map(p=>`<div class="inv-item"><span class="sp ${p.stock<=0?'sp-out':p.stock<=3?'sp-low':'sp-ok'}">${p.stock<=0?'OUT':p.stock<=3?'LOW':'OK'}</span><span class="inv-name">${escHtml(p.name)} <span style="font-size:10px;color:var(--gray)">${p.category?'· '+escHtml(p.category):''}</span></span><input class="inv-input" type="number" value="${p.stock}" min="0" id="inv-${p.id}"><button class="btn-upd" onclick="updateStock('${p.id}')">UPDATE</button></div>`).join('');
+};
+
+window._originalUpdateStock = window.updateStock;
+window.updateStock = async function(id) {
+  const val = parseInt(document.getElementById('inv-'+id).value);
+  if(isNaN(val)||val<0) return;
+  const prods = window._cachedProducts || [];
+  const p = prods.find(x=>String(x.id)===String(id)); if(!p) return;
+  p.stock = val;
+  await fbSaveProduct(p);
+  showToast('Stock updated · Stock actualizado');
+  renderInventory(); renderStats();
+};
+
+window._originalLoadSettings = window.loadSettings;
+window.loadSettings = async function() {
+  const s = await fbGetSettings();
+  window._cachedSettings = s;
+  document.getElementById('waNum').value = s.waNumber||'';
+  document.getElementById('wsMin').value = s.wsMin||50;
+};
+
+window._originalSaveSettings = window.saveSettings;
+window.saveSettings = async function() {
+  const s = window._cachedSettings || {};
+  const wa = document.getElementById('waNum').value.trim();
+  const wsm = parseFloat(document.getElementById('wsMin').value);
+  const pw = document.getElementById('newPw').value;
+  if(wa) s.waNumber = wa;
+  if(!isNaN(wsm)) s.wsMin = wsm;
+  if(pw) s.adminPw = pw;
+  await fbSaveSettings(s);
+  window._cachedSettings = s;
+  document.getElementById('newPw').value='';
+  showToast('Settings saved · Configuración guardada');
+};
+
+// ── LOADING OVERLAY ──
+function showLoading(show) {
+  let el = document.getElementById('loadingOverlay');
+  if(!el) {
+    el = document.createElement('div');
+    el.id = 'loadingOverlay';
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;font-family:Cinzel,serif;font-size:11px;letter-spacing:0.2em;color:#B8963E';
+    el.innerHTML = '<div style="width:32px;height:32px;border:2px solid #E8E3DA;border-top-color:#B8963E;border-radius:50%;animation:spin 0.8s linear infinite"></div>LOADING';
+    const style = document.createElement('style');
+    style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+    document.body.appendChild(el);
+  }
+  el.style.display = show ? 'flex' : 'none';
+}
+
+// ── INIT WITH FIREBASE ──
+window._cachedProducts = [];
+window._cachedOrders = [];
+window._cachedSettings = {waNumber:'+14070000000', wsMin:50, adminPw:'admin15'};
+
+// Boot the store with Firebase data
+renderStore();
+
+</script>
 </body>
 </html>
